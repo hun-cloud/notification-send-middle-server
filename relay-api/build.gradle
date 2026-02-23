@@ -28,7 +28,9 @@ dependencies {
 
 	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.0.1'
 
-	implementation project(':relay-application');
+	implementation project(':relay-application')
+	implementation project(':relay-infrastructure')
+	implementation project(':relay-core')
 }
 
 tasks.named('test') {
