@@ -1,4 +1,4 @@
-package com.notification.relay.application.common.response;
+package com.notification.relay.api.common.response;
 
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
