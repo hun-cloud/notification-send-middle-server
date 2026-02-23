@@ -1,0 +1,9 @@
+rootProject.name = 'relay'
+
+include 'relay-api'
+include 'relay-application'
+include 'relay-common'
+include 'relay-core'
+include 'relay-event'
+include 'relay-worker'
+include 'relay-infrastructure'
