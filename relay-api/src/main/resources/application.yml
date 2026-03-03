@@ -26,6 +26,7 @@ spring:
     port: 5672
     username: guest
     password: guest
+    publisher-confirms: true
     publisher-confirm-type: correlated
     publisher-returns: true
     listener:
@@ -63,3 +64,14 @@ server:
       charset: UTF-8
       enabled: true
       force: true
+
+# outbox 설정
+outbox:
+  publish:
+    confirm-timeout-seconds: 5
+    max-retry-count: 3
+
+# snowflake 설정x
+snowflake:
+  worker-id: ${WORKER_ID:0}
+  data-center-id: ${DATA_CENTER_ID:0}

@@ -83,8 +83,8 @@ public class NotificationOutbox {
 		this.retryCount++;
 	}
 
-	public boolean canRetry() {
-		return retryCount < 3;
+	public boolean canRetry(int maxRetryCount) {
+		return retryCount < maxRetryCount;
 	}
 
 	public void incrementRetry(String message) {

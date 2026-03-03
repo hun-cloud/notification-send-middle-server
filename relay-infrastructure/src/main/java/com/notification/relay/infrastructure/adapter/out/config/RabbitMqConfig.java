@@ -4,17 +4,18 @@ import java.util.HashMap;
 import java.util.Map;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.CustomExchange;
 import org.springframework.amqp.core.Queue;
-import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+@Slf4j
 @Configuration
 @RequiredArgsConstructor
 public class RabbitMqConfig {
@@ -25,6 +26,13 @@ public class RabbitMqConfig {
 	public RabbitTemplate rabbitTemplate(ConnectionFactory connectionFactory) {
 		RabbitTemplate rabbitTemplate = new RabbitTemplate(connectionFactory);
 		rabbitTemplate.setMandatory(true);
+		rabbitTemplate.setReturnsCallback(returned -> {
+			log.error("메시지 라우팅 실패: exchange={}, routingKey={}, replyCode={}, replyText={}",
+					returned.getExchange(),
+					returned.getRoutingKey(),
+					returned.getReplyCode(),
+					returned.getReplyText());
+		});
 		return rabbitTemplate;
 	}
 
