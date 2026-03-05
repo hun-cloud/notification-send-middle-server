@@ -4,6 +4,7 @@ Spring Boot 기반의 분산 알림 중계 시스템으로, Transactional Outbox
 
 ## 목차
 - [주요 포인트 (설계 고민 사항)](#주요-포인트-설계-고민-사항)
+- [2주차 추가 구현 사항](#2주차-추가-구현-사항)
 - [프로젝트 구조](#프로젝트-구조)
 - [아키텍처](#아키텍처)
 - [기술 스택](#기술-스택)
@@ -96,6 +97,111 @@ Spring Boot 기반의 분산 알림 중계 시스템으로, Transactional Outbox
 
 ---
 
+## 2주차 추가 구현 사항
+
+### 1. Consumer Requeue 정책 - DLX + Wait Queue + Dead Queue
+
+**구현 내용**
+- RabbitMQ Dead Letter Exchange(DLX) 패턴을 활용한 실패 메시지 재처리 파이프라인 구현
+- 메시지 처리 실패 시 Wait Queue(TTL: 30초)로 이동 → TTL 만료 후 원래 Exchange로 재진입
+- 최대 재시도 횟수(기본 3회) 초과 시 Dead Queue로 영구 보관
+
+**재처리 흐름**
+```
+메인 큐 → [처리 실패] → Wait Queue (TTL: 30초) → 원래 Exchange → 메인 큐 재진입
+                                                                   ↓ (3회 초과)
+                                                              Dead Queue (영구 보관)
+```
+
+**`x-death` 헤더 기반 재시도 횟수 추적**
+- RabbitMQ가 DLX로 메시지를 이동시킬 때 `x-death` 헤더에 실패 이력을 자동 기록
+- `MessageParser.getDeathCount()`로 현재 재시도 횟수를 추출하여 정책 적용
+
+**핵심 코드 위치**
+- `relay-worker/src/main/java/com/notification/relay/worker/config/RabbitMqConsumerConfig.java`
+- `relay-infrastructure/.../config/RabbitMqConfig.java` (메인 큐 DLX 설정 추가)
+
+**기술적 결정: Wait Queue를 채널 타입당 1개로 구성**
+- 초기 설계에서는 메인 큐마다 Wait Queue를 두는 방식(예: `sms.0.wait`, `sms.1.wait`) 검토
+- Wait Queue에서 TTL 만료 시 Consistent Hash Exchange로 재진입하므로, userId 기반으로 재라우팅되어 순서 보장이 유지됨
+- 따라서 Wait Queue는 채널 타입당 1개(`notification.sms.wait`)로 충분하며 큐 수를 최소화
+
+### 2. Manual Acknowledge 모드
+
+**구현 내용**
+- `acknowledge-mode: manual` 설정으로 메시지 처리 완료 후 명시적 ACK/NACK 전송
+- `prefetch: 1`로 한 번에 하나의 메시지만 처리하여 순서 보장 강화
+
+**기술적 결정: 왜 Manual Ack인가**
+- Auto ACK는 메시지 수신 즉시 RabbitMQ에서 삭제하므로, 처리 중 서버 다운 시 메시지 유실
+- Manual ACK는 발송 성공 후 ACK를 보내므로 처리 보장 가능
+- 실무에서도 외부 API 호출이 포함된 컨슈머는 Manual ACK가 표준적인 방식
+
+### 3. 외부 API 신뢰성 - Timeout / Retry / Circuit Breaker
+
+**구현 내용**
+- **Read Timeout**: RestClient에 연결 3초, 읽기 5초 타임아웃 적용 (무한 대기 방지)
+- **Retry**: Resilience4j `@Retry`로 외부 API 실패 시 최대 3회 자동 재시도
+- **Circuit Breaker**: 실패율 50% 초과 시 회로 차단, 10초 후 Half-Open 상태로 복구 시도
+
+**장애 흐름**
+```
+send() 호출
+  → Retry: 최대 3회 재시도
+    → 모두 실패 시 Circuit Breaker 실패로 기록
+      → 실패율 50% 초과 시 Circuit Open (이후 즉시 fallback)
+        → fallback: ExternalApiUnavailableException 발생
+          → Consumer: NACK 전송 → Wait Queue로 이동
+```
+
+**기술적 결정: Resilience4j 선택 이유**
+- Spring Boot 4.0에서 Spring Retry는 AOP 기반 Circuit Breaker를 기본 제공하지 않음
+- Resilience4j는 `@CircuitBreaker` + `@Retry` 애노테이션으로 선언적 적용 가능
+- 경량 라이브러리로 추가 인프라 없이 단일 서비스 내에서 동작
+
+**핵심 코드 위치**
+- `relay-worker/src/main/java/com/notification/relay/worker/sender/HttpNotificationSender.java`
+- `relay-worker/src/main/java/com/notification/relay/worker/config/RestClientConfig.java`
+- `relay-api/src/main/resources/application.yml` (resilience4j 설정)
+
+### 4. 멱등성 처리 - Redis 기반 중복 방지
+
+**구현 내용**
+- 메시지 처리 전 Redis에서 `notificationId` 존재 여부 확인
+- 처리 완료 후 Redis에 `processed:notification:{id}` 키를 TTL 1일로 저장
+- Wait Queue 재처리 시나리오에서 동일 메시지 중복 발송 방지
+
+**기술적 결정: 인터페이스(`IdempotencyChecker`) 분리**
+- Redis가 아닌 다른 저장소(DB, Memcached 등)로 변경 시 구현체만 교체
+- Consumer가 구체 구현에 의존하지 않아 테스트 시 Mock 주입 용이
+
+**핵심 코드 위치**
+- `relay-worker/src/main/java/com/notification/relay/worker/idempotency/IdempotencyChecker.java` (인터페이스)
+- `relay-worker/src/main/java/com/notification/relay/worker/idempotency/RedisIdempotencyChecker.java`
+
+### 5. 발송 API 연동 - Port/Adapter 패턴
+
+**구현 내용**
+- `NotificationSender` 인터페이스로 발송 수단 추상화
+- `HttpNotificationSender`: Mock Send API를 RestClient로 호출하는 HTTP 구현체
+
+**기술적 결정: `NotificationSender` 인터페이스 분리**
+- 현재 HTTP REST 방식이지만 향후 gRPC, SDK 방식으로 변경 가능
+- Consumer가 구체 구현이 아닌 인터페이스에만 의존 → 발송 수단 교체 시 Consumer 코드 무변경
+
+**핵심 코드 위치**
+- `relay-worker/src/main/java/com/notification/relay/worker/sender/NotificationSender.java` (인터페이스)
+- `relay-worker/src/main/java/com/notification/relay/worker/sender/HttpNotificationSender.java`
+
+### 6. relay-worker 통합 구조
+
+**기술적 결정: 별도 서버 없이 relay-api에 통합**
+- Worker를 별도 애플리케이션으로 분리하면 배포 복잡도 증가
+- 현 단계에서는 relay-worker 모듈을 relay-api 의존성으로 추가하여 단일 프로세스로 실행
+- 향후 트래픽 증가 시 독립 서버로 분리 가능한 구조 유지 (모듈 경계 명확히 분리)
+
+---
+
 ## 프로젝트 구조
 
 ### 멀티모듈 구성
@@ -129,7 +235,12 @@ relay/
 │
 ├── relay-common/           # 공통 모듈 (공유 유틸리티)
 ├── relay-event/            # 이벤트 처리 모듈 (향후 확장)
-└── relay-worker/           # 워커 모듈 (향후 컨슈머 구현)
+└── relay-worker/           # 워커 모듈 (컨슈머, 발송 처리)
+    ├── consumer/           # RabbitMQ 메시지 컨슈머 (SMS/Email/Kakao)
+    ├── sender/             # 외부 발송 API 연동 (NotificationSender 인터페이스)
+    ├── idempotency/        # 멱등성 처리 (Redis 기반 중복 방지)
+    ├── publisher/          # Dead Letter 발행
+    └── config/             # Wait Queue, Dead Queue, RestClient 설정
 ```
 
 ### 모듈별 의존성 관계
@@ -151,6 +262,12 @@ relay-infrastructure
 
 relay-core
   └─> relay-common
+
+relay-api
+  └─> relay-worker (통합 실행)
+
+relay-worker
+  (독립 모듈, Spring Boot BOM 의존)
 ```
 
 ---
@@ -213,10 +330,21 @@ relay-core
 └─────────────────────────────────────────┘
                │
                ▼
-       ┌──────────────┐
-       │   Workers    │
-       │  (Future)    │
-       └──────────────┘
+       ┌──────────────────────────────────────────────┐
+       │              relay-worker (relay-api 내 실행) │
+       │                                              │
+       │  SmsNotificationConsumer                     │
+       │    1. IdempotencyChecker (Redis 중복 확인)    │
+       │    2. NotificationSender (외부 API 호출)      │
+       │       └─> @Retry + @CircuitBreaker           │
+       │    3. ACK / NACK                             │
+       │                                              │
+       │  [실패 시]                                    │
+       │  NACK → Wait Queue (TTL: 30초)               │
+       │       → 원래 Exchange 재진입 (재시도)           │
+       │  [3회 초과]                                   │
+       │  Dead Queue (영구 보관)                       │
+       └──────────────────────────────────────────────┘
 ```
 
 ### 계층별 책임
@@ -252,11 +380,18 @@ relay-core
   - Publisher Confirms 활성화
   - Durable Queue 설정
 
+### Cache / Idempotency
+- **Redis** - 멱등성 체크 (중복 메시지 처리 방지, TTL 1일)
+
+### Resilience
+- **Resilience4j 2.3.0** - Circuit Breaker + Retry (외부 API 신뢰성)
+- **Apache HttpClient 5** - RestClient 커넥션 풀, Timeout 설정
+
 ### Libraries
 - **Lombok** - 보일러플레이트 코드 제거
 - **SpringDoc OpenAPI 3.0.1** - API 문서 자동 생성
 - **JUnit 5** - 단위 테스트
-- **Mockito** - 모킹 프레임워크
+- **Mockito** - 모킹 프레임워크 (RETURNS_SELF 활용 Fluent API 테스트)
 
 ### Infrastructure
 - **Docker & Docker Compose** - 로컬 개발 환경 구성
@@ -457,6 +592,8 @@ http://localhost:8080/swagger-ui/index.html
 ## 추가 개선 사항 (향후 계획)
 
 - [ ] 알림 내역 조회 API 구현
-- [ ] Dead Letter Queue 처리 로직 추가
+- [ ] Dead Queue 모니터링 및 수동 재처리 API
+- [ ] relay-worker 독립 서버 분리 (트래픽 증가 시)
+- [ ] 발송 수단별 gRPC 전환 (NotificationSender 구현체 교체)
 
 ---

@@ -20,6 +20,7 @@ repositories {
 
 dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
@@ -31,6 +32,7 @@ dependencies {
 	implementation project(':relay-application')
 	implementation project(':relay-infrastructure')
 	implementation project(':relay-core')
+	implementation project(':relay-worker')
 }
 
 tasks.named('test') {
