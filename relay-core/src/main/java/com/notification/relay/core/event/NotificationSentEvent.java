@@ -1,6 +1,4 @@
-package com.notification.relay.application.dto.result;
-
-import java.time.LocalDateTime;
+package com.notification.relay.core.event;
 
 import com.notification.relay.core.domain.NotificationType;
 import lombok.Getter;
@@ -8,13 +6,10 @@ import lombok.RequiredArgsConstructor;
 
 @Getter
 @RequiredArgsConstructor
-public class NotificationHistoryResult {
+public class NotificationSentEvent {
 
-	private final Long id;
+	private final String notificationId;
 	private final String userId;
 	private final String message;
 	private final NotificationType notificationType;
-	private final String sendStatus;
-	private final String errorMessage;
-	private final LocalDateTime createdAt;
 }
