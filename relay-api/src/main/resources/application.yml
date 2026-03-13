@@ -31,11 +31,13 @@ spring:
     publisher-returns: true
     listener:
       simple:
-        retry:
-          enabled: true
-          initial-interval: 3000
-          max-attempts: 3
-          multiplier: 2.0
+        acknowledge-mode: manual
+        prefetch: 1
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
 
 # RabbitMQ 커스텀 설정
 rabbitmq:
@@ -75,3 +77,28 @@ outbox:
 snowflake:
   worker-id: ${WORKER_ID:0}
   data-center-id: ${DATA_CENTER_ID:0}
+
+consumer:
+  retry:
+    max-attempts: 3
+    wait-ttl-ms: 30000
+
+sender:
+  mock:
+    url: http://localhost:8081
+    connect-timeout-ms: 3000
+    read-timeout-ms: 5000
+  retry:
+    max-attempts: 3
+    wait-duration-ms: 1000
+
+resilience4j:
+  circuit-breaker:
+    instances:
+      notificationSender:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: true
+        automatic-transition-from-open-to-half-open-enabled: true

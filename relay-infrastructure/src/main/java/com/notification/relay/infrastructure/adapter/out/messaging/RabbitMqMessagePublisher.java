@@ -36,6 +36,8 @@ public class RabbitMqMessagePublisher implements MessagePublisherPort {
 				message -> {
 					message.getMessageProperties()
 							.setHeader("notificationId", notification.getId());
+					message.getMessageProperties()
+							.setHeader("userId", notification.getUserId());
 					return message;
 				},
 				correlationData);
