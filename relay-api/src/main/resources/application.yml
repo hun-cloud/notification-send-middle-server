@@ -88,19 +88,11 @@ sender:
     url: http://localhost:8081
     connect-timeout-ms: 3000
     read-timeout-ms: 5000
+  retry:
+    max-attempts: 3
+    wait-duration-ms: 1000
 
 resilience4j:
-  retry:
-    instances:
-      notificationSender:
-        max-attempts: 3
-        wait-duration: 1s
-        retry-exceptions:
-          - org.springframework.web.client.ResourceAccessException
-          - org.springframework.web.client.HttpServerErrorException
-        ignore-exceptions:
-          - org.springframework.web.client.HttpClientErrorException
-
   circuit-breaker:
     instances:
       notificationSender:
@@ -109,3 +101,4 @@ resilience4j:
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         register-health-indicator: true
+        automatic-transition-from-open-to-half-open-enabled: true

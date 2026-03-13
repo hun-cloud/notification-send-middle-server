@@ -79,3 +79,17 @@ in-flight 상태(unacked / PEL)에 남을 수 있음
 이 경우에 대한 처리 전략이 필요합니다.
 
 아직 컨슈머 쪽 개발은 진행되지 않은 상태인가요?
+
+---
+
+1. 예외 타입 중심 분류에서 상태코드+원인 기반 분류로 세분화 필요
+   현재는 ResourceAccessException, HttpServerErrorException 같은 예외 타입 중심으로 Retry 정책이 걸려 있어 운영 상황별 제어가 제한됩니다.
+   status code(429/5xx/4xx) + 예외 원인(timeout, DNS, connection reset 등)을 함께 기준으로 Retryable / NonRetryable을 명확히 분리하면, 불필요 재시도를 줄이고
+   장애 대응 일관성을 높일 수 있습니다.
+
+2. ResourceAccessException을 통해 내부 timeout / connection fail 대응은 GOOD
+   다만 현재 장점이 코드에만 암묵적으로 남아 있으므로, “어떤 timeout/connection 오류를 재시도 대상으로 본다”는 세부적인 부분까지 고려하면 좋겠습니다!
+
+3. 저트래픽 환경에서 Circuit Breaker가 OPEN→CLOSED로 늦게 복귀하는 케이스의 고민
+   장애 해소 후에도 호출량이 낮으면 Half-Open 검증 기회가 부족해 정상 복귀가 지연될 수 있습니다.
+   저트래픽 상황도 고려하여 해결책을 고민해보면 좋겠습니다!
