@@ -2,6 +2,9 @@ package com.notification.relay.worker.consumer;
 
 import java.io.IOException;
 
+import com.notification.relay.core.domain.NotificationType;
+import com.notification.relay.core.event.NotificationFailedEvent;
+import com.notification.relay.core.event.NotificationSentEvent;
 import com.notification.relay.worker.config.RetryProperties;
 import com.notification.relay.worker.idempotency.IdempotencyChecker;
 import com.notification.relay.worker.publisher.DeadLetterPublisher;
@@ -13,6 +16,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 @Slf4j
@@ -25,6 +29,7 @@ public class KakaoNotificationConsumer {
 	private final RetryProperties retryProperties;
 	private final NotificationSender notificationSender;
 	private final MessageParser messageParser;
+	private final ApplicationEventPublisher eventPublisher;
 
 	@RabbitListener(queues = {"notification.kakao.0", "notification.kakao.1",
 			"notification.kakao.2", "notification.kakao.3"})
@@ -48,6 +53,13 @@ public class KakaoNotificationConsumer {
 
 			idempotencyChecker.markAsProcessed(notificationId);
 			channel.basicAck(deliveryTag, false);
+
+			eventPublisher.publishEvent(new NotificationSentEvent(
+					notificationId,
+					messageParser.getReceiver(message),
+					messageParser.getBody(message),
+					NotificationType.KAKAO
+			));
 			log.info("[Kakao] 처리 완료: notificationId={}", notificationId);
 
 		} catch (Exception e) {
@@ -58,6 +70,14 @@ public class KakaoNotificationConsumer {
 				log.error("[Kakao] 최종 실패, Dead Queue 이동: notificationId={}", notificationId);
 				deadLetterPublisher.publish(message, "kakao");
 				channel.basicAck(deliveryTag, false);
+
+				eventPublisher.publishEvent(new NotificationFailedEvent(
+						notificationId,
+						messageParser.getReceiver(message),
+						messageParser.getBody(message),
+						NotificationType.KAKAO,
+						e.getMessage()
+				));
 			} else {
 				channel.basicNack(deliveryTag, false, false);
 			}

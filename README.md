@@ -5,6 +5,7 @@ Spring Boot 기반의 분산 알림 중계 시스템으로, Transactional Outbox
 ## 목차
 - [주요 포인트 (설계 고민 사항)](#주요-포인트-설계-고민-사항)
 - [2주차 추가 구현 사항](#2주차-추가-구현-사항)
+- [3주차 추가 구현 사항](#3주차-추가-구현-사항)
 - [프로젝트 구조](#프로젝트-구조)
 - [아키텍처](#아키텍처)
 - [기술 스택](#기술-스택)
@@ -234,7 +235,6 @@ relay/
 │   └── util/               # ID 생성기 등 유틸리티
 │
 ├── relay-common/           # 공통 모듈 (공유 유틸리티)
-├── relay-event/            # 이벤트 처리 모듈 (향후 확장)
 └── relay-worker/           # 워커 모듈 (컨슈머, 발송 처리)
     ├── consumer/           # RabbitMQ 메시지 컨슈머 (SMS/Email/Kakao)
     ├── sender/             # 외부 발송 API 연동 (NotificationSender 인터페이스)
@@ -589,9 +589,72 @@ Content-Type: application/json
 http://localhost:8080/swagger-ui/index.html
 ```
 
+## 3주차 추가 구현 사항
+
+### 1. 알림 내역 조회 API
+
+**구현 내용**
+- 요청자(userId)별 최근 7일 내역 + 발송 결과(SUCCESS/FAILED)를 조회하는 API
+- Snowflake ID를 커서로 활용한 커서 기반 페이지네이션
+- 발송 결과 저장을 위한 `notification_history` 읽기 전용 테이블 분리 (CQRS)
+
+**조회 API**
+```
+GET /api/v1/notifications/history?userId=abc              → 첫 페이지 (최신 20건)
+GET /api/v1/notifications/history?userId=abc&cursor=12345  → 12345번 이전 20건
+```
+
+**커서 기반 페이지네이션을 선택한 이유**
+- OFFSET 방식은 데이터가 많아질수록 깊은 페이지에서 성능이 급격히 저하됨
+- Snowflake ID가 시간순 정렬을 보장하므로 `id < cursor` 조건만으로 정렬+필터가 가능
+- 복합 인덱스 `(userId, createdAt, id)`를 활용하여 인덱스 스캔으로 빠르게 조회
+
+### 2. 발송 결과 저장 - ApplicationEvent 기반 비동기 처리
+
+**구현 내용**
+- Worker(Consumer)에서 외부 API 호출 결과를 Spring ApplicationEventPublisher로 이벤트 발행
+- 별도의 EventListener가 이벤트를 수신하여 `notification_history` 테이블에 비동기 저장
+- 발송 성공 시 `NotificationSentEvent`, 최종 실패(Dead Letter Queue 이동) 시 `NotificationFailedEvent` 발행
+
+**발송 결과 저장 흐름**
+```
+[성공] Consumer → 외부 API 호출 성공 → ACK → NotificationSentEvent 발행 → history (SUCCESS)
+[실패] Consumer → 재시도 초과 → Dead Letter Queue 이동 → NotificationFailedEvent 발행 → history (FAILED)
+```
+
+**ApplicationEvent를 선택한 이유**
+- Worker의 핵심 책임(외부 API 호출 + ACK)과 이력 저장을 트랜잭션 분리
+- history DB 장애 시에도 발송 처리와 ACK에 영향 없음
+- 별도 컨슈머/큐 없이 같은 프로세스 내에서 이벤트 기반 분리가 가능
+- 인메모리 이벤트 유실 시에도 발송 자체는 완료된 상태이므로 치명적이지 않음 (조회 누락만 발생)
+
+**읽기/쓰기 테이블을 분리한 이유**
+- 기존 `notification_outbox`는 스케줄러가 PENDING 상태를 주기적으로 폴링하는 쓰기 중심 테이블
+- 여기에 조회 트래픽까지 추가되면 스케줄러와 조회가 같은 테이블에서 경합
+- `notification_history`를 별도로 두어 쓰기 부하와 읽기 부하를 완전히 분리
+
+### 3. 운영 관점 - 데이터 아카이빙 및 파티셔닝 전략
+
+**보관 정책**
+- 사용자에게 노출하는 알림 내역은 최근 7일로 제한
+- 7일이 지난 데이터는 조회 대상에서 제외되지만, 법적 보관 의무나 분석 목적으로 일정 기간 보관이 필요
+
+**월별 Range Partition 운영 방안**
+- `notification_history` 테이블을 `created_at` 기준 월별 Range Partition으로 구성
+- 마지막에 MAXVALUE 파티션을 두어 파티션 추가를 놓쳐도 INSERT가 실패하지 않도록 안전장치 확보
+- 매월 스케줄러가 3개월 뒤 파티션을 자동 생성하고, 보관 기간이 지난 파티션을 DROP
+- DROP PARTITION은 대량 DELETE보다 훨씬 빠르고 테이블 락 없이 즉시 제거 가능
+
+**아카이빙 흐름**
+- 보관 기간이 지난 파티션은 DROP 전에 S3 또는 아카이빙 DB로 백업
+- CSV/Parquet 형식으로 내보내어 장기 보관하고, 필요 시 분석 용도로 활용
+- 운영 테이블에는 항상 최근 수개월 데이터만 유지하여 조회 성능 확보
+
+---
+
 ## 추가 개선 사항 (향후 계획)
 
-- [ ] 알림 내역 조회 API 구현
+- [ ] Redis 캐싱 적용 (첫 페이지 캐싱 + 발송 완료 시 캐시 무효화)
 - [ ] Dead Queue 모니터링 및 수동 재처리 API
 - [ ] relay-worker 독립 서버 분리 (트래픽 증가 시)
 - [ ] 발송 수단별 gRPC 전환 (NotificationSender 구현체 교체)
